@@ -11,6 +11,7 @@ from typing import Set, Dict, List
 
 from zepben.evolve import connect, NetworkService, SyncNetworkConsumerClient, PowerTransformer, ConductingEquipment
 import csv
+import pandas as pd
 
 from load_synthesiser.db.energy_profile import EnergyProfile, NetworkEnergyProfile
 from load_synthesiser.db.id_date_range import IdDateRange
@@ -18,6 +19,36 @@ from load_synthesiser.db.sqlitedb import IndexSqliteDatabase, write_database, Sq
 
 logger = logging.getLogger(__name__)
 
+
+def read_disttx_energyprofile_csv(path: str, feeder_mrids: list):
+    """
+    Load disttx load profiles directly
+    """
+    # read and parse datetime
+    disttx_df = pd.read_csv(path, parse_dates=['datetime'])
+
+    # filter and sort
+    disttx_df = disttx_df[disttx_df.feeder_mrid.isin(feeder_mrids)]
+    disttx_df = disttx_df.sort_values(by='datetime', ascending=True)
+
+    # create date col
+    disttx_df['date'] = disttx_df['datetime'].dt.date
+
+    neps = []
+    for feeder_mrid, row_0 in disttx_df.groupby('feeder_mrid'):
+        energy_profile_by_date = {date : [] for date in row_0['date'].unique()}
+
+        for date, row_1 in row_0.groupby('date'):
+
+            for disttx_mrid, row_2 in row_1.groupby('disttx_mrid'):
+                ep = EnergyProfile(disttx_mrid, date)
+
+                for idx, row_3 in row_2.iterrows():
+                    ep.add_readings(row_3['p'], 0)
+
+                energy_profile_by_date[date].append(ep)
+        neps.append(NetworkEnergyProfile(feeder_mrid, row_0.disttx_mrid.unique(), energy_profile_by_date))
+    return neps
 
 def load_energy_data(path: str, feeder_mrids, power_ratings: Dict[str, Dict[str, float]]) -> List[NetworkEnergyProfile]:
     """
@@ -107,7 +138,8 @@ def load_data(path: str, client: SyncNetworkConsumerClient, feeder_mrids: Set[st
     # Parse input data and generate energy_profile_by_date.
     # Each date should have an EnergyProfile for every transformer with load data.
     # EnergyProfile is documented in energy_profile.py
-    neps = load_energy_data(path, feeder_mrids, power_ratings)
+    # neps = load_energy_data(path, feeder_mrids, power_ratings)
+    neps = read_disttx_energyprofile_csv(path, feeder_mrids)
 
     entity_ids = set()
     for nep in neps:
@@ -173,7 +205,7 @@ def main():
         logger.error(f"At least one feeder must be provided.")
 
     with connect(host=args.ewb_server, rpc_port=args.rpc_port, conf_address=args.conf_address, client_id=client_id, client_secret=client_secret, pkey=key,
-                 cert=cert, ca=ca) as channel:
+                    cert=cert, ca=ca) as channel:
         client = SyncNetworkConsumerClient(channel)
 
         load_data(args.load_csv, client, args.feeder, args.output_dir)
